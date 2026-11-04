@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+
+# Local databases
+*.sqlite
+*.sqlite3
+# Environment variants
+.env.*
+!.env.example
+
+# Build and generated files
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Backup files
+*.backup
+*.backup_*
+*.bak
+
+# Temporary and backup files
+*.tmp
+*.old
+*.swp
+
+# Local diagnostic scripts
+diagnose_changenow.py
+test_changenow_*.py
