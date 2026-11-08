@@ -21,3 +21,4 @@ httpx
 jinja2
 rich
 email-validator
+pytest

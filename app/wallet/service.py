@@ -13,6 +13,35 @@ from app.referral.service import maybe_reward_first_qualifying_credit
 class WalletService:
 
     @staticmethod
+    def _existing_reference(
+        db: Session,
+        *,
+        reference: str,
+        wallet_id: uuid.UUID,
+        amount: Decimal,
+        transaction_type: str,
+        direction: str,
+    ) -> Transaction | None:
+        existing = db.scalar(
+            select(Transaction)
+            .where(Transaction.reference == reference)
+            .with_for_update()
+        )
+        if not existing:
+            return None
+        if (
+            existing.wallet_id != wallet_id
+            or existing.amount != amount
+            or existing.transaction_type != transaction_type
+            or existing.direction != direction
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Transaction reference was already used for a different operation.",
+            )
+        return existing
+
+    @staticmethod
     def credit(
         db: Session,
         *,
@@ -42,6 +71,17 @@ class WalletService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Wallet not found.",
             )
+
+        existing = WalletService._existing_reference(
+            db,
+            reference=reference,
+            wallet_id=wallet_id,
+            amount=amount,
+            transaction_type=transaction_type,
+            direction="credit",
+        )
+        if existing:
+            return existing
 
         balance_before = wallet.balance
         balance_after = balance_before + amount
