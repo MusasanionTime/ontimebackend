@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     MONNIFY_SECRET_KEY: str = ""
     MONNIFY_CONTRACT_CODE: str = ""
 
+    # Topify Dedicated Virtual Accounts. Keep disabled until an approved
+    # businessId and the appropriate test/live credentials are configured.
+    TOPIFY_ENABLED: bool = False
+    TOPIFY_BASE_URL: str = "https://apipay.topify.ng"
+    TOPIFY_API_KEY: str = ""
+    TOPIFY_WEBHOOK_SECRET: str = ""
+    TOPIFY_BUSINESS_ID: str = ""
+
     # BTPass
     BTPASS_BASE_URL: str = ""
     BTPASS_API_KEY: str = ""

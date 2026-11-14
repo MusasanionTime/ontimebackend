@@ -1,26 +1,25 @@
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.routes.auth import router as auth_router
-from app.api.v1.routes.login import router as login_router
-from app.api.v1.routes.wallet import router as wallet_router
-from app.api.v1.routes.referral import router as referral_router
-from app.api.v1.routes.admin_platform_wallet import router as admin_platform_wallet_router
-from app.api.v1.routes.admin_referral import router as admin_referral_router
-from app.api.v1.routes.monnify import router as monnify_router
-from app.api.v1.routes.changenow import router as changenow_router
-from app.api.v1.routes.bigisub import router as bigisub_router
-from app.api.v1.routes.monnify_deposits import router as monnify_deposits_router
-
 from app.api.v1.routes.admin import router as admin_router
-from app.api.v1.routes.admin_monnify import router as admin_monnify_router
-from app.api.v1.routes.admin_changenow import router as admin_changenow_router
-from app.api.v1.routes.admin_bigisub import router as admin_bigisub_router
 from app.api.v1.routes.admin_audit import router as admin_audit_router
-
+from app.api.v1.routes.admin_bigisub import router as admin_bigisub_router
+from app.api.v1.routes.admin_changenow import router as admin_changenow_router
+from app.api.v1.routes.admin_monnify import router as admin_monnify_router
+from app.api.v1.routes.admin_platform_wallet import (
+    router as admin_platform_wallet_router,
+)
+from app.api.v1.routes.admin_referral import router as admin_referral_router
+from app.api.v1.routes.auth import router as auth_router
+from app.api.v1.routes.bigisub import router as bigisub_router
+from app.api.v1.routes.changenow import router as changenow_router
+from app.api.v1.routes.login import router as login_router
+from app.api.v1.routes.monnify import router as monnify_router
+from app.api.v1.routes.monnify_deposits import router as monnify_deposits_router
+from app.api.v1.routes.referral import router as referral_router
+from app.api.v1.routes.topify import router as topify_router
+from app.api.v1.routes.wallet import router as wallet_router
 from app.core.config import settings
-
 
 # =========================================================
 # APPLICATION
@@ -41,7 +40,6 @@ ALLOWED_ORIGINS = [
     # Local development
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-
     # Production frontend
     "https://ontimesub.com",
     "https://www.ontimesub.com",
@@ -80,6 +78,7 @@ app.include_router(referral_router, prefix="/api/v1")
 
 app.include_router(monnify_router, prefix="/api/v1")
 app.include_router(monnify_deposits_router, prefix="/api/v1")
+app.include_router(topify_router, prefix="/api/v1")
 
 
 # =========================================================
@@ -114,6 +113,7 @@ app.include_router(admin_audit_router, prefix="/api/v1")
 # ROOT
 # =========================================================
 
+
 @app.get("/")
 async def home():
     return {
@@ -126,6 +126,7 @@ async def home():
 # =========================================================
 # HEALTH
 # =========================================================
+
 
 @app.get("/health")
 async def health():
