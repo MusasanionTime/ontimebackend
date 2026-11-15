@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth.security import verify_password, create_access_token
+from app.auth.security import create_access_token, verify_password
 from app.database.database import get_db
 from app.models.user import User
 from app.schemas.login import LoginRequest, LoginResponse
-
+from app.topify.provisioning import provision_topify_account_after_login
 
 router = APIRouter(
     prefix="/auth",
@@ -20,6 +20,7 @@ router = APIRouter(
 )
 def login(
     data: LoginRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     user = db.scalar(
@@ -49,6 +50,13 @@ def login(
 
     access_token = create_access_token(
         subject=str(user.id)
+    )
+
+    # The response is sent before this task contacts Topify. Its own session
+    # keeps provider failures isolated from authentication and the login DB.
+    background_tasks.add_task(
+        provision_topify_account_after_login,
+        user.id,
     )
 
     return LoginResponse(

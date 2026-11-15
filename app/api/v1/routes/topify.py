@@ -3,7 +3,15 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    status,
+)
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -19,6 +27,10 @@ from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.wallet import Wallet
 from app.topify.client import TopifyClient
+from app.topify.provisioning import (
+    ensure_topify_account,
+    provision_topify_account_after_login,
+)
 from app.topify.service import (
     kobo_to_naira,
     parse_kobo,
@@ -69,149 +81,36 @@ def _account_view(account: TopifyAccount) -> dict:
     }
 
 
-def _name_for_user(user: User) -> str:
-    first_name = (user.first_name or "").strip()
-    last_name = (user.last_name or "").strip()
-    if not first_name or not last_name:
-        raise HTTPException(
-            status_code=400,
-            detail="Add your first and last name before reserving an account.",
-        )
-    name = f"{first_name} {last_name}"
-    return name[:200]
-
-
 @router.post("/accounts/reserve")
 def reserve_account(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _require_enabled()
-    phone = (current_user.phone or "").strip()
-    if not phone:
-        raise HTTPException(
-            status_code=400,
-            detail="Add a phone number before reserving a Topify account.",
-        )
-    if not current_user.email:
-        raise HTTPException(
-            status_code=400,
-            detail="A customer email is required for Topify account reservation.",
-        )
-
-    wallet = db.scalar(
-        select(Wallet).where(Wallet.user_id == current_user.id).with_for_update()
-    )
-    if not wallet:
-        raise HTTPException(status_code=404, detail="Wallet not found.")
-    if wallet.status.lower() != "active" or wallet.currency.upper() != "NGN":
-        raise HTTPException(
-            status_code=409, detail="An active NGN wallet is required for Topify."
-        )
-
-    account = db.scalar(
-        select(TopifyAccount)
-        .where(TopifyAccount.user_id == current_user.id)
-        .with_for_update()
-    )
-    if account and account.status == "active" and account.account_number:
-        return {"success": True, "data": _account_view(account)}
-
     _require_enabled(reservation=True)
-
-    if not account:
-        account = TopifyAccount(
-            id=uuid.uuid4(),
-            user_id=current_user.id,
-            wallet_id=wallet.id,
-            request_email=current_user.email,
-            request_name=_name_for_user(current_user),
-            request_phone=phone,
-            bank_code="30901",
-            currency="NGN",
-            status="pending",
-        )
-        db.add(account)
-        try:
-            db.commit()
-            db.refresh(account)
-        except IntegrityError as exc:
-            db.rollback()
-            account = db.scalar(
-                select(TopifyAccount).where(TopifyAccount.user_id == current_user.id)
-            )
-            if not account:
-                raise HTTPException(
-                    status_code=409,
-                    detail="A Topify account request is already being processed.",
-                ) from exc
-    account.status = "pending"
-    db.commit()
-
-    try:
-        result = TopifyClient().reserve_virtual_account(
-            email=account.request_email,
-            name=account.request_name,
-            phone_number=account.request_phone,
-            business_id=settings.TOPIFY_BUSINESS_ID,
-        )
-    except RuntimeError as exc:
-        # Keep the row pending. Topify documents the reservation tuple as idempotent,
-        # so an uncertain request can be retried with exactly the same values.
+    result = ensure_topify_account(db, current_user.id)
+    account = result["account"]
+    if result["status"] == "profile_incomplete":
         raise HTTPException(
-            status_code=502,
-            detail="Topify could not confirm the account request. It remains pending; retry later.",
-        ) from exc
-
-    customer = (
-        result.get("customer") if isinstance(result.get("customer"), dict) else {}
-    )
-    accounts = result.get("accounts")
-    moniepoint = next(
-        (
-            item
-            for item in accounts or []
-            if isinstance(item, dict)
-            and str(item.get("provider", "")).lower() in {"moniepoint", "30901"}
-        ),
-        None,
-    )
-    if (
-        not moniepoint
-        or not moniepoint.get("account_number")
-        or not customer.get("customer_code")
-    ):
-        raise HTTPException(
-            status_code=502,
-            detail="Topify accepted the request but returned no complete Moniepoint account. Retry to reconcile it.",
+            status_code=400,
+            detail="Add your name, email, and phone before reserving a Topify account.",
         )
-
-    account.customer_code = str(customer["customer_code"])
-    account.account_number = str(moniepoint["account_number"])
-    account.account_name = str(moniepoint.get("account_name") or "")[:200] or None
-    account.bank_name = str(moniepoint.get("bank_name") or "")[:150] or None
-    account.is_sandbox = (
-        moniepoint.get("is_sandbox")
-        if isinstance(moniepoint.get("is_sandbox"), bool)
-        else settings.TOPIFY_API_KEY.startswith("sk_test_")
-    )
-    account.status = "active" if moniepoint.get("is_active") is True else "pending"
-    account.provider_metadata = {
-        "provider": "moniepoint",
-        "is_sandbox": account.is_sandbox,
+    if result["status"] == "wallet_unavailable":
+        raise HTTPException(
+            status_code=409,
+            detail="An active NGN wallet is required for Topify.",
+        )
+    if result["status"] == "active" and account:
+        return {"success": True, "status": "active", "data": _account_view(account)}
+    return {
+        "success": True,
+        "status": result["status"],
+        "data": _account_view(account) if account else None,
+        "message": "Topify account provisioning is pending and will be retried safely.",
     }
-    db.commit()
-    db.refresh(account)
-    if account.status != "active":
-        raise HTTPException(
-            status_code=502,
-            detail="Topify has not confirmed the account as active. Retry later to reconcile it.",
-        )
-    return {"success": True, "data": _account_view(account)}
-
 
 @router.get("/accounts/me")
 def get_my_account(
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -219,8 +118,25 @@ def get_my_account(
         select(TopifyAccount).where(TopifyAccount.user_id == current_user.id)
     )
     if not account:
-        raise HTTPException(status_code=404, detail="Topify account not found.")
-    return {"success": True, "data": _account_view(account)}
+        background_tasks.add_task(
+            provision_topify_account_after_login,
+            current_user.id,
+        )
+        return {
+            "success": True,
+            "status": "provisioning",
+            "data": None,
+        }
+    if account.status != "active":
+        background_tasks.add_task(
+            provision_topify_account_after_login,
+            current_user.id,
+        )
+    return {
+        "success": True,
+        "status": account.status,
+        "data": _account_view(account),
+    }
 
 
 @router.get("/accounts/me/provider")

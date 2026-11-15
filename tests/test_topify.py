@@ -5,13 +5,14 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  # register all tables on shared metadata
 from app.api.v1.routes import topify
+from app.api.v1.routes.login import login as login_route
 from app.core.config import settings
 from app.database.base import Base
 from app.models.topify_account import TopifyAccount
@@ -19,7 +20,12 @@ from app.models.topify_webhook_event import TopifyWebhookEvent
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.wallet import Wallet
+from app.schemas.login import LoginRequest
 from app.topify.client import TopifyClient
+from app.topify.provisioning import (
+    ensure_topify_account,
+    provision_topify_account_after_login,
+)
 from app.topify.service import kobo_to_naira, parse_kobo, verify_webhook_signature
 
 
@@ -472,4 +478,251 @@ def test_wallet_funded_and_charge_failed_events_never_credit_wallet(db_factory):
     assert (
         db.scalar(select(Transaction).where(Transaction.provider == "topify")) is None
     )
+    db.close()
+
+
+def test_login_queues_topify_provisioning_without_waiting_for_provider(
+    db_factory, monkeypatch
+):
+    db = db_factory()
+    user = User(
+        id=uuid4(),
+        email="login@example.com",
+        phone="08011112222",
+        password_hash="test-hash",
+        referral_code=f"T{uuid4().hex[:8]}",
+        first_name="Login",
+        last_name="Customer",
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    monkeypatch.setattr("app.api.v1.routes.login.verify_password", lambda *_: True)
+    monkeypatch.setattr(
+        "app.api.v1.routes.login.create_access_token", lambda **_: "test-token"
+    )
+    tasks = BackgroundTasks()
+
+    response = login_route(
+        LoginRequest(email=user.email, password="password"),
+        tasks,
+        db,
+    )
+
+    assert response.access_token == "test-token"
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].args == (user.id,)
+    assert tasks.tasks[0].func.__name__ == "provision_topify_account_after_login"
+    db.close()
+
+
+def test_login_provisioning_worker_swallows_database_or_provider_errors(monkeypatch):
+    class FailedProvisioningSession:
+        rolled_back = False
+        closed = False
+
+        def rollback(self):
+            self.rolled_back = True
+
+        def close(self):
+            self.closed = True
+
+    session = FailedProvisioningSession()
+    monkeypatch.setattr(settings, "TOPIFY_ENABLED", True)
+    monkeypatch.setattr("app.topify.provisioning.SessionLocal", lambda: session)
+
+    def fail_provisioning(*_args):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("app.topify.provisioning.ensure_topify_account", fail_provisioning)
+    provision_topify_account_after_login(uuid4())
+
+    assert session.rolled_back is True
+    assert session.closed is True
+
+
+def test_account_status_endpoint_returns_provisioning_and_queues_retry(db_factory):
+    db = db_factory()
+    user = User(
+        id=uuid4(),
+        email="status@example.com",
+        phone="08011112222",
+        password_hash="x",
+        referral_code=f"T{uuid4().hex[:8]}",
+        first_name="Status",
+        last_name="Customer",
+        is_active=True,
+    )
+    wallet = Wallet(
+        id=uuid4(),
+        user_id=user.id,
+        wallet_number=f"W{uuid4().hex[:12]}",
+        currency="NGN",
+        balance=Decimal("0.00"),
+        status="active",
+    )
+    db.add_all([user, wallet])
+    db.commit()
+    tasks = BackgroundTasks()
+
+    response = topify.get_my_account(
+        background_tasks=tasks,
+        current_user=user,
+        db=db,
+    )
+
+    assert response == {"success": True, "status": "provisioning", "data": None}
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].args == (user.id,)
+    db.close()
+
+
+def test_existing_active_account_is_reused_without_provider_request(
+    db_factory, monkeypatch
+):
+    db = db_factory()
+    user, wallet, account = seed_customer(db)
+    monkeypatch.setattr(settings, "TOPIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "TOPIFY_API_KEY", "sk_test_placeholder")
+    monkeypatch.setattr(settings, "TOPIFY_BUSINESS_ID", "approved-test-business")
+
+    def provider_must_not_be_called(**_):
+        raise AssertionError("Active account must be reused without a provider call.")
+
+    result = ensure_topify_account(
+        db,
+        user.id,
+        client_factory=provider_must_not_be_called,
+    )
+
+    assert result["status"] == "active"
+    assert result["account"].id == account.id
+    assert wallet.balance == Decimal("50.00")
+    db.close()
+
+
+def test_new_login_provisions_account_then_pending_retry_checks_customer_code(
+    db_factory, monkeypatch
+):
+    db = db_factory()
+    user = User(
+        id=uuid4(),
+        email="pending@example.test",
+        phone="08011112222",
+        password_hash="x",
+        referral_code=f"T{uuid4().hex[:8]}",
+        first_name="Pending",
+        last_name="Customer",
+        is_active=True,
+    )
+    wallet = Wallet(
+        id=uuid4(),
+        user_id=user.id,
+        wallet_number=f"W{uuid4().hex[:12]}",
+        currency="NGN",
+        balance=Decimal("25.00"),
+        status="active",
+    )
+    db.add_all([user, wallet])
+    db.commit()
+    monkeypatch.setattr(settings, "TOPIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "TOPIFY_API_KEY", "sk_test_placeholder")
+    monkeypatch.setattr(settings, "TOPIFY_BUSINESS_ID", "approved-test-business")
+    calls = {"reserve": 0, "check": 0}
+
+    class PendingThenActiveClient:
+        def __init__(self, **_):
+            pass
+
+        def reserve_virtual_account(self, **_):
+            calls["reserve"] += 1
+            return {
+                "customer": {"customer_code": "CUS-PENDING"},
+                "accounts": [
+                    {
+                        "provider": "moniepoint",
+                        "account_number": "9012345678",
+                        "account_name": "PENDING CUSTOMER",
+                        "bank_name": "Moniepoint MFB",
+                        "is_active": False,
+                    }
+                ],
+            }
+
+        def get_customer_accounts(self, customer_code):
+            calls["check"] += 1
+            assert customer_code == "CUS-PENDING"
+            return [
+                {
+                    "provider": "moniepoint",
+                    "account_number": "9012345678",
+                    "account_name": "PENDING CUSTOMER",
+                    "bank_name": "Moniepoint MFB",
+                    "is_active": True,
+                }
+            ]
+
+    first = ensure_topify_account(db, user.id, client_factory=PendingThenActiveClient)
+    assert first["status"] == "pending"
+    assert first["account"].customer_code == "CUS-PENDING"
+    assert calls == {"reserve": 1, "check": 0}
+
+    first["account"].updated_at = first["account"].updated_at.replace(
+        year=first["account"].updated_at.year - 1
+    )
+    db.commit()
+    second = ensure_topify_account(db, user.id, client_factory=PendingThenActiveClient)
+
+    assert second["status"] == "active"
+    assert second["account"].account_number == "9012345678"
+    assert calls == {"reserve": 1, "check": 1}
+    assert wallet.balance == Decimal("25.00")
+    db.close()
+
+
+def test_provider_failure_leaves_a_pending_account_and_throttles_retries(
+    db_factory, monkeypatch
+):
+    db = db_factory()
+    user = User(
+        id=uuid4(),
+        email="retry@example.test",
+        phone="08011112222",
+        password_hash="x",
+        referral_code=f"T{uuid4().hex[:8]}",
+        first_name="Retry",
+        last_name="Customer",
+        is_active=True,
+    )
+    wallet = Wallet(
+        id=uuid4(),
+        user_id=user.id,
+        wallet_number=f"W{uuid4().hex[:12]}",
+        currency="NGN",
+        balance=Decimal("0.00"),
+        status="active",
+    )
+    db.add_all([user, wallet])
+    db.commit()
+    monkeypatch.setattr(settings, "TOPIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "TOPIFY_API_KEY", "sk_test_placeholder")
+    monkeypatch.setattr(settings, "TOPIFY_BUSINESS_ID", "approved-test-business")
+    calls = 0
+
+    class UnavailableClient:
+        def __init__(self, **_):
+            pass
+
+        def reserve_virtual_account(self, **_):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("provider unavailable")
+
+    first = ensure_topify_account(db, user.id, client_factory=UnavailableClient)
+    second = ensure_topify_account(db, user.id, client_factory=UnavailableClient)
+
+    assert first["status"] == second["status"] == "pending"
+    assert first["account"].id == second["account"].id
+    assert calls == 1
+    assert wallet.balance == Decimal("0.00")
     db.close()

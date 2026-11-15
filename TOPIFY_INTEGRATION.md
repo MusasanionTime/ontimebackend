@@ -28,6 +28,14 @@ All customer endpoints use the existing ONTIME bearer authentication.
 | `GET /api/v1/topify/transactions/{reference}/verify` | Verify a Topify reference already recorded against the signed-in customer's wallet. It does not credit an unowned or unrecorded reference. |
 | `POST /api/v1/topify/webhooks` | Receive signed Topify events. Configure this public HTTPS URL in the Topify dashboard. |
 
+## Automatic login onboarding
+
+After a successful login, the backend queues Topify provisioning as a FastAPI background task. The token response is sent without waiting for Topify, and the task uses its own database session. Provider or database errors are logged by type and leave login successful. This applies to existing users on their next login as well as new users after they first log in; registration itself does not contact Topify.
+
+The unique user and wallet constraints keep one local reservation per customer. A short `reserving`/`checking` claim prevents concurrent logins from starting the same work. When Topify returns a `customer_code`, the backend persists it before saving the account details. Pending accounts are checked through Topify's customer-account lookup on a later login or account refresh; they do not submit a second reservation while that provider reference is available. A five-minute retry interval throttles provider calls. If the reservation response is uncertain and no provider reference was received, a retry uses the same stored email/name/phone tuple documented by Topify as its idempotency key.
+
+`GET /api/v1/topify/accounts/me` returns `status: "provisioning"` and `data: null` while no local record exists, or returns the saved account and its current status. Pending account reads queue a status check after the response. Only a confirmed active Moniepoint account is returned with `status: "active"`. Account creation and status checks never change wallet balances; only a verified successful payment can credit the wallet.
+
 ## Settlement and event rules
 
 - Webhook HMAC-SHA512 uses the exact raw request body and `X-Topify-Signature`, compared in constant time. Missing secrets/signatures are rejected in every environment.
