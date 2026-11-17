@@ -59,3 +59,9 @@ htmlcov/
 # Local diagnostic scripts
 diagnose_changenow.py
 test_changenow_*.py
+node_modules/
+.neon
+
+.env.staging
+
+.env

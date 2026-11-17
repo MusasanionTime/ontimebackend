@@ -100,3 +100,102 @@ def debit_platform_wallet(
     db.add(transaction)
     db.flush()
     return transaction
+
+
+def _existing_system_transaction(
+    db: Session,
+    *,
+    reference: str,
+    amount: Decimal,
+    transaction_type: str,
+    direction: str,
+) -> PlatformTransaction | None:
+    existing = db.scalar(
+        select(PlatformTransaction)
+        .where(PlatformTransaction.reference == reference)
+        .with_for_update()
+    )
+    if not existing:
+        return None
+    if (
+        existing.amount != amount
+        or existing.transaction_type != transaction_type
+        or existing.direction != direction
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Platform ledger reference was already used for another operation.",
+        )
+    return existing
+
+
+def credit_platform_wallet_system(
+    db: Session,
+    *,
+    amount: Decimal,
+    reference: str,
+    transaction_type: str,
+    description: str,
+) -> PlatformTransaction:
+    """Post an idempotent system credit through the platform ledger."""
+    if amount <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be greater than zero.")
+    existing = _existing_system_transaction(
+        db, reference=reference, amount=amount,
+        transaction_type=transaction_type, direction="credit",
+    )
+    if existing:
+        return existing
+    wallet = get_or_create_platform_wallet(db)
+    if wallet.status != "active":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Platform wallet is not active.")
+    before = wallet.balance
+    after = before + amount
+    wallet.balance = after
+    transaction = PlatformTransaction(
+        id=uuid.uuid4(), platform_wallet_id=wallet.id, admin_id=None,
+        reference=reference, transaction_type=transaction_type, direction="credit",
+        amount=amount, balance_before=before, balance_after=after,
+        currency=wallet.currency, status="completed", description=description,
+    )
+    db.add(transaction)
+    db.flush()
+    return transaction
+
+
+def debit_platform_wallet_system(
+    db: Session,
+    *,
+    amount: Decimal,
+    reference: str,
+    transaction_type: str,
+    description: str,
+) -> PlatformTransaction:
+    """Post an idempotent system debit without permitting a negative balance."""
+    if amount <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be greater than zero.")
+    existing = _existing_system_transaction(
+        db, reference=reference, amount=amount,
+        transaction_type=transaction_type, direction="debit",
+    )
+    if existing:
+        return existing
+    wallet = db.scalar(select(PlatformWallet).with_for_update())
+    if not wallet:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Platform wallet is unavailable.")
+    if wallet.status != "active":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Platform wallet is not active.")
+    if wallet.balance < amount:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Insufficient platform wallet balance.")
+    before = wallet.balance
+    after = before - amount
+    wallet.balance = after
+    transaction = PlatformTransaction(
+        id=uuid.uuid4(), platform_wallet_id=wallet.id, admin_id=None,
+        reference=reference, transaction_type=transaction_type, direction="debit",
+        amount=amount, balance_before=before, balance_after=after,
+        currency=wallet.currency, status="completed", description=description,
+    )
+    db.add(transaction)
+    db.flush()
+    return transaction

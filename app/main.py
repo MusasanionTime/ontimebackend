@@ -5,6 +5,7 @@ from app.api.v1.routes.admin import router as admin_router
 from app.api.v1.routes.admin_audit import router as admin_audit_router
 from app.api.v1.routes.admin_bigisub import router as admin_bigisub_router
 from app.api.v1.routes.admin_changenow import router as admin_changenow_router
+from app.api.v1.routes.admin_commissions import router as admin_commissions_router
 from app.api.v1.routes.admin_monnify import router as admin_monnify_router
 from app.api.v1.routes.admin_platform_wallet import (
     router as admin_platform_wallet_router,
@@ -105,6 +106,7 @@ app.include_router(admin_referral_router, prefix="/api/v1")
 
 app.include_router(admin_monnify_router, prefix="/api/v1")
 app.include_router(admin_changenow_router, prefix="/api/v1")
+app.include_router(admin_commissions_router, prefix="/api/v1")
 app.include_router(admin_bigisub_router, prefix="/api/v1")
 app.include_router(admin_audit_router, prefix="/api/v1")
 

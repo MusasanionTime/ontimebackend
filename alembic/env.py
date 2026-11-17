@@ -3,8 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.core.config import settings
-from app.database.database import Base
+from app.database.base import Base
 import app.models
 
 # Alembic configuration
@@ -17,15 +16,10 @@ if config.config_file_name is not None:
 # SQLAlchemy metadata for autogenerate
 target_metadata = Base.metadata
 
-# Use the application's DATABASE_URL from .env
-config.set_main_option(
-    "sqlalchemy.url",
-    settings.DATABASE_URL,
-)
-
-
 def run_migrations_offline() -> None:
     """Run migrations without creating a database connection."""
+
+    from app.core.config import settings
 
     url = settings.DATABASE_URL
 
@@ -45,6 +39,27 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations using a live database connection."""
 
+    # Test and staging tooling may supply an already-validated connection. This
+    # also lets PostgreSQL integration tests migrate inside a disposable schema
+    # without ever touching the staging database's public schema.
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        context.configure(
+            connection=supplied_connection,
+            target_metadata=target_metadata,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
+    from app.core.config import settings
+
+    # Normal migrations use the application's configured database. Staging
+    # tooling sets DATABASE_URL in its isolated process before entering here.
+    config.set_main_option(
+        "sqlalchemy.url",
+        settings.DATABASE_URL.replace("%", "%%"),
+    )
     connectable = engine_from_config(
         config.get_section(
             config.config_ini_section,

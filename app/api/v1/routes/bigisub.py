@@ -15,6 +15,7 @@ from app.database.database import get_db
 from app.models.wallet import Wallet
 from app.wallet.service import WalletService
 from app.bigisub.service import BigisubService
+from app.commission.service import finalize_confirmed_purchase, record_provider_success
 
 
 router = APIRouter(prefix="/bigisub", tags=["Bigisub"])
@@ -139,6 +140,39 @@ def _provider_response(provider_result):
     )
 
     return provider_result, data, status, provider_reference
+
+
+def _finalize_confirmed_purchase(
+    db: Session,
+    transaction,
+    *,
+    service_category: str,
+    provider_reference: str | None,
+) -> bool:
+    """Persist provider success, then atomically finalize purchase and commission."""
+    try:
+        record_provider_success(
+            db,
+            purchase_transaction_id=transaction.id,
+            provider="bigisub",
+            provider_reference=provider_reference,
+            service_category=service_category,
+        )
+        finalize_confirmed_purchase(
+            db,
+            purchase_transaction_id=transaction.id,
+            service_category=service_category,
+            provider="bigisub",
+        )
+        db.refresh(transaction)
+        return transaction.status == "completed"
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Confirmed BigiSub purchase needs finalization. reference=%s",
+            transaction.reference,
+        )
+        return False
 
 
 # ============================================================
@@ -292,6 +326,10 @@ def purchase_airtime(
         )
 
         transaction.transaction_type = "airtime_purchase"
+        transaction.provider_metadata = {
+            **(transaction.provider_metadata or {}),
+            "commission_purchase_amount": str(amount),
+        }
 
         db.commit()
         db.refresh(transaction)
@@ -398,9 +436,16 @@ def purchase_airtime(
         "successful",
         "completed",
     }:
-        transaction.status = "completed"
-        db.commit()
-        db.refresh(transaction)
+        if not _finalize_confirmed_purchase(
+            db, transaction, service_category="airtime", provider_reference=provider_reference
+        ):
+            return {
+                "success": True,
+                "status": "pending",
+                "reference": reference,
+                "provider_reference": provider_reference,
+                "message": "Provider confirmed the purchase, but ONTIME is finalizing its records. Do not retry.",
+            }
 
         return {
             "success": True,
@@ -606,6 +651,10 @@ def purchase_data(
         description=f"Data purchase to {payload.phone_number}, plan {payload.plan}",
     )
     transaction.transaction_type = "data_purchase"
+    transaction.provider_metadata = {
+        **(transaction.provider_metadata or {}),
+        "commission_purchase_amount": str(amount),
+    }
     db.commit()
     db.refresh(transaction)
 
@@ -635,9 +684,16 @@ def purchase_data(
     success = result.get("success") is True
 
     if success and status in {"successful", "success", "completed"}:
-        transaction.status = "completed"
-        transaction.provider_reference = provider_reference
-        db.commit()
+        if not _finalize_confirmed_purchase(
+            db, transaction, service_category="data", provider_reference=provider_reference
+        ):
+            return {
+                "success": True,
+                "status": "pending",
+                "reference": reference,
+                "provider_reference": provider_reference,
+                "message": "Provider confirmed the purchase, but ONTIME is finalizing its records. Do not retry.",
+            }
         return {
             "success": True,
             "status": "successful",
@@ -864,6 +920,10 @@ def purchase_result_checker(
         ),
     )
     transaction.transaction_type = "result_checker_purchase"
+    transaction.provider_metadata = {
+        **(transaction.provider_metadata or {}),
+        "commission_purchase_amount": str(total_amount),
+    }
     db.commit()
     db.refresh(transaction)
 
@@ -904,9 +964,16 @@ def purchase_result_checker(
     if provider_success and provider_status in {
         "successful", "success", "completed"
     }:
-        transaction.status = "completed"
-        transaction.provider_reference = provider_reference
-        db.commit()
+        if not _finalize_confirmed_purchase(
+            db, transaction, service_category="result_checker", provider_reference=provider_reference
+        ):
+            return {
+                "success": True,
+                "status": "pending",
+                "reference": reference,
+                "provider_reference": provider_reference,
+                "message": "Provider confirmed the purchase, but ONTIME is finalizing its records. Do not retry.",
+            }
 
         return {
             "success": True,
@@ -1266,6 +1333,10 @@ def purchase_electricity(
         ),
     )
     transaction.transaction_type = "electricity_purchase"
+    transaction.provider_metadata = {
+        **(transaction.provider_metadata or {}),
+        "commission_purchase_amount": str(amount),
+    }
     db.commit()
     db.refresh(transaction)
 
@@ -1304,9 +1375,16 @@ def purchase_electricity(
     if provider_success and provider_status in {
         "successful", "success", "completed"
     }:
-        transaction.status = "completed"
-        transaction.provider_reference = provider_reference
-        db.commit()
+        if not _finalize_confirmed_purchase(
+            db, transaction, service_category="electricity", provider_reference=provider_reference
+        ):
+            return {
+                "success": True,
+                "status": "pending",
+                "reference": reference,
+                "provider_reference": provider_reference,
+                "message": "Provider confirmed the purchase, but ONTIME is finalizing its records. Do not retry.",
+            }
         return {
             "success": True,
             "status": "successful",

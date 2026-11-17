@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.transaction import Transaction
 from app.models.wallet import Wallet
+from app.commission.service import reverse_commission_for_purchase
 from app.referral.service import maybe_reward_first_qualifying_credit
 
 
@@ -106,6 +107,27 @@ class WalletService:
 
         db.add(transaction)
         db.flush()
+
+        purchase_refund_types = {
+            "airtime_purchase_refund",
+            "data_purchase_refund",
+            "electricity_purchase_refund",
+            "result_checker_refund",
+        }
+        if transaction_type in purchase_refund_types:
+            purchase_reference = reference.removesuffix("-REFUND")
+            purchase = db.scalar(
+                select(Transaction)
+                .where(Transaction.reference == purchase_reference)
+                .with_for_update()
+            )
+            if purchase:
+                reverse_commission_for_purchase(
+                    db,
+                    purchase_transaction=purchase,
+                    refund_reference=reference,
+                    reason=description or f"Refund for purchase {purchase_reference}",
+                )
 
         # Referral reward is evaluated only after a successful wallet credit.
         maybe_reward_first_qualifying_credit(

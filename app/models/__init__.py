@@ -1,6 +1,7 @@
 from app.models.admin import Admin
 from app.models.admin_audit_log import AdminAuditLog
 from app.models.crypto_exchange import CryptoExchange
+from app.models.commission import CommissionConfiguration, CommissionReversal, PurchaseCommission
 from app.models.monnify_account import MonnifyAccount
 from app.models.password_reset_token import PasswordResetToken
 from app.models.platform_wallet import PlatformTransaction, PlatformWallet
@@ -16,6 +17,9 @@ __all__ = [
     "Admin",
     "AdminAuditLog",
     "CryptoExchange",
+    "CommissionConfiguration",
+    "CommissionReversal",
+    "PurchaseCommission",
     "MonnifyAccount",
     "PasswordResetToken",
     "PlatformTransaction",
