@@ -1,7 +1,6 @@
-
 """PostgreSQL-only integration tests for purchase commissions.
 
-Uses only the dedicated ontime_commission_staging database.
+Uses only the dedicated ONTIME SUBDATA Neon staging database.
 Each test gets a separate temporary schema. The public schema and
 production Railway database are not modified.
 """
@@ -27,7 +26,10 @@ from sqlalchemy.pool import NullPool
 
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
-EXPECTED_DATABASE = "ontime_commission_staging"
+
+EXPECTED_DATABASE = "neondb"
+EXPECTED_HOST = "ep-old-flower-bdj55qjk.c-8.us-east-2.aws.neon.tech"
+EXPECTED_REVISION = "e2f471c39a60"
 
 pytestmark = pytest.mark.postgresql
 
@@ -44,26 +46,29 @@ def _validated_url():
         )
 
     if url.get_backend_name() != "postgresql":
-        pytest.fail("TEST_DATABASE_URL must target PostgreSQL (value suppressed).")
+        pytest.fail("TEST_DATABASE_URL must target PostgreSQL.")
 
     if (url.database or "").lower() != EXPECTED_DATABASE:
         pytest.fail(
             f"PostgreSQL integration tests require database {EXPECTED_DATABASE}."
         )
 
+    if (url.host or "").lower() != EXPECTED_HOST:
+        pytest.fail(
+            "PostgreSQL integration tests require the dedicated Neon staging host."
+        )
+
     if not url.host or any(
         marker in url.host.lower() for marker in ("railway", "rlwy")
     ):
-        pytest.fail(
-            "TEST_DATABASE_URL host is missing or is a Railway host (value suppressed)."
-        )
+        pytest.fail("Railway database connections are prohibited.")
 
     return url
 
 
 @pytest.fixture(scope="function")
 def pg():
-    """Create a disposable schema and migrate it for one test."""
+    """Create and migrate a disposable PostgreSQL schema for one test."""
 
     url = _validated_url()
 
@@ -74,9 +79,11 @@ def pg():
     )
 
     schema = f"commission_it_{uuid.uuid4().hex}"
+    schema_created = False
     engine = None
 
     try:
+        # Verify database identity and PostgreSQL version.
         with root_engine.begin() as connection:
             db_name, version_num = connection.execute(
                 text(
@@ -97,12 +104,14 @@ def pg():
             if version_num < 140000:
                 pytest.fail("PostgreSQL 14 or newer is required.")
 
-            connection.exec_driver_sql(
-                f'CREATE SCHEMA "{schema}"'
+            connection.execute(
+                text(f'CREATE SCHEMA "{schema}"')
             )
 
-        # The startup option applies search_path to every physical connection,
-        # including connections created by concurrent test workers.
+        schema_created = True
+
+        # Every physical connection, including concurrent workers,
+        # uses the isolated schema.
         engine = create_engine(
             url,
             pool_size=10,
@@ -118,9 +127,30 @@ def pg():
             str(Path(__file__).parents[1] / "alembic.ini")
         )
 
-        with engine.connect() as connection:
+        # Commit migrations before tests start.
+        with engine.begin() as connection:
+            current_schema = connection.execute(
+                text("SELECT current_schema()")
+            ).scalar_one()
+
+            if current_schema != schema:
+                pytest.fail(
+                    "PostgreSQL did not select the isolated test schema."
+                )
+
             alembic_config.attributes["connection"] = connection
             command.upgrade(alembic_config, "head")
+
+        # Verify the committed migration in the isolated schema.
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text(
+                    f'SELECT version_num FROM "{schema}".alembic_version'
+                )
+            ).scalar_one()
+
+            if revision != EXPECTED_REVISION:
+                pytest.fail("Unexpected Alembic migration revision.")
 
         factory = sessionmaker(
             bind=engine,
@@ -139,10 +169,12 @@ def pg():
         if engine is not None:
             engine.dispose()
 
-        with root_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'
-            )
+        # Drop only the schema created by this fixture.
+        if schema_created:
+            with root_engine.begin() as connection:
+                connection.execute(
+                    text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+                )
 
         root_engine.dispose()
 
